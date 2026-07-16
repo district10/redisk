@@ -1,0 +1,56 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "redisk"
+dynamic = ["version"]
+description = "Redis (Kvrocks) backed cache with local disk offload for large values, derived from python-diskcache."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.9"
+authors = [
+    { name = "TANG ZHIXIONG" },
+]
+keywords = ["redis", "kvrocks", "cache", "disk", "offload", "diskcache"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Natural Language :: English",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Database",
+]
+dependencies = [
+    "redis>=5.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+    "fakeredis>=2.20",
+]
+
+[tool.hatch.version]
+path = "src/redisk/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/redisk"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/redisk",
+    "tests",
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

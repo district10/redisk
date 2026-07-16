@@ -1,0 +1,8 @@
+redisk
+======
+
+Copyright 2026 TANG ZHIXIONG
+
+This product includes software derived from python-diskcache
+(https://github.com/grantjenks/python-diskcache),
+Copyright 2016-2023 Grant Jenks, licensed under the Apache License 2.0.
