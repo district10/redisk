@@ -75,7 +75,7 @@ use `decode_responses=False` (the default) and is left open on `close()`.
 ### Storage layout
 
 Each cache entry is a single Redis key under the namespace
-`{prefix}:cache:{typed-key}` holding a pickled record:
+`{prefix}:cache:{typed-key}` holding a msgpack-encoded record:
 
 ```
 (store_time, expire_time, tag, size, mode, filename, value)
@@ -91,6 +91,26 @@ Two bookkeeping keys complete the picture:
 * `{prefix}:meta` — a hash with `count`, `size`, `hits`, `misses` counters.
 * `{prefix}:index` — a sorted set of entry keys scored by `store_time`,
   used for least-recently-stored eviction.
+
+### Serialization
+
+**Everything written to Redis is bytes, and serialization is always
+[msgpack](https://msgpack.org/) — never pickle.** Keys, values, and tags
+must be msgpack-native types: `None`, `bool`, `int` (64-bit), `float`,
+`str`, `bytes`, `list`, `dict`, and `tuple` (preserved via a msgpack
+extension type, so tuples round-trip as tuples). Anything else — custom
+objects, integers outside the 64-bit range — raises `TypeError`; encode
+such data to `bytes` yourself before storing.
+
+`str`/`bytes`/`int`/`float` keys are used as-is; other keys are
+msgpack-encoded. `str` and `bytes` values are stored raw (text/binary);
+other supported values are msgpack-encoded. `memoize(typed=True)` encodes
+argument types as their qualified name strings, so typed keys keep working
+(but iterating such keys yields the type *name*, not the type object).
+
+Serialization is pluggable via the `disk` parameter: `Disk` (default,
+msgpack) or `JSONDisk` (JSON + zlib), or your own subclass — same protocol
+as diskcache.
 
 ### Expiry
 
@@ -168,16 +188,13 @@ Methods (see docstrings for details):
 * `memoize(name=None, typed=False, expire=None, tag=None, ignore=())`
 * `iterkeys()`, `close()`, context-manager support
 
-Serialization is pluggable via the `disk` parameter: `Disk` (default, pickle)
-or `JSONDisk` (JSON + zlib), or your own subclass — same protocol as
-diskcache.
-
 ## Differences from diskcache
 
 | diskcache                              | redisk                                        |
 |----------------------------------------|-----------------------------------------------|
 | SQLite k/v store                       | Redis/Kvrocks k/v store                       |
 | `Cache(directory)`                     | `Cache(redis_conn_url, offload_folder, ...)`  |
+| pickle serialization                   | msgpack only; keys/values/tags must be msgpack-native (tuple supported via ext type) |
 | Client-side expiry checks              | Native Redis TTLs; every entry has one (`MAX_TTL_SECS` default & cap) |
 | Transactions, `Timeout`, `retry` args  | Dropped (no multi-key atomicity without Lua)  |
 | LRU/LFU eviction (writes on read)      | Dropped by design; `none` / `least-recently-stored` only |

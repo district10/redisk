@@ -49,16 +49,13 @@ def test_init_disk(redis_client, tmp_path):
         redis_client,
         str(tmp_path / 'offload'),
         prefix='redisk-test-init-disk',
-        disk_pickle_protocol=1,
         disk_min_file_size=2**20,
     ) as cache:
         key = (None, 0, 'abc')
         cache[key] = 0
         cache.check()
         assert cache.disk_min_file_size == 2**20
-        assert cache.disk_pickle_protocol == 1
         assert cache._disk.min_file_size == 2**20
-        assert cache._disk.pickle_protocol == 1
 
 
 def test_disk_valueerror():
@@ -148,13 +145,14 @@ def test_getsetdel(cache):
         (None, False),
         ((None,) * 2**20, False),
         (1234, False),
-        (2**512, False),
         (56.78, False),
         ('hello', False),
         ('hello' * 2**20, False),
         (b'world', False),
         (b'world' * 2**20, False),
         (io.BytesIO(b'world' * 2**20), True),
+        ({'a': [1, 2.5, 'x', b'y', None, True]}, False),
+        ((1, 'two', 3.0, b'4'), False),
     ]
 
     for key, (value, file_like) in enumerate(values):
@@ -173,16 +171,22 @@ def test_getsetdel(cache):
 
     assert len(cache) == 0
 
-    for value, (key, _) in enumerate(values):
-        cache[key] = value
+    # Second round: use the values themselves as keys. File-like objects
+    # cannot be msgpack-encoded, so they are skipped here (covered above).
 
-    assert len(cache) == len(values)
+    for index, (value, file_like) in enumerate(values):
+        if not file_like:
+            cache[value] = index
 
-    for value, (key, _) in enumerate(values):
-        assert cache[key] == value
+    assert len(cache) == len(values) - 1
 
-    for _, (key, _) in enumerate(values):
-        del cache[key]
+    for index, (value, file_like) in enumerate(values):
+        if not file_like:
+            assert cache[value] == index
+
+    for index, (value, file_like) in enumerate(values):
+        if not file_like:
+            del cache[value]
 
     assert len(cache) == 0
 
@@ -237,6 +241,33 @@ def test_set_twice(cache):
     assert cache.get(0, read=True) == 2
 
     cache.check()
+
+
+def test_unsupported_types(cache):
+    class Custom:
+        pass
+
+    # Custom objects are not msgpack-serializable.
+    with pytest.raises(TypeError):
+        cache.set(0, Custom())
+
+    with pytest.raises(TypeError):
+        cache.set(Custom(), 0)
+
+    # Integers outside the 64-bit range are not msgpack-serializable.
+    with pytest.raises(TypeError):
+        cache.set(1, 2**512)
+
+    assert len(cache) == 0
+    assert len(cache.check()) == 0
+
+
+def test_msgpack_tuple_roundtrip(cache):
+    # Tuples are preserved via a msgpack extension type.
+    key = ('a', 1, 2.5, b'x', None, (True, 'nested'))
+    cache[key] = key
+    assert cache[key] == key
+    assert list(cache) == [key]
 
 
 def test_raw(cache):
@@ -764,7 +795,9 @@ def test_constant():
 
 
 def test_memoize(cache):
-    count = 1000
+    # Values must fit in 64-bit integers (msgpack), so fib(1000) is out;
+    # fib(89) is the largest that fits.
+    count = 90
 
     def fibiter(num):
         alpha, beta = 0, 1

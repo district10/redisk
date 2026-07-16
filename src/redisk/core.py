@@ -8,6 +8,11 @@ update TTLs or access metadata.
 
 Large values are offloaded to files in a local directory, exactly like
 diskcache's ``Disk`` serialization.
+
+All data written to Redis is bytes. Serialization uses msgpack (never
+pickle): keys, values, tags, and the metadata record must be
+msgpack-serializable (None, bool, int, float, str, bytes, list, dict, and
+tuple, which is preserved via a msgpack extension type).
 """
 
 import codecs
@@ -18,14 +23,13 @@ import io
 import json
 import os
 import os.path as op
-import pickle
-import pickletools
 import tempfile
 import time
 import warnings
 import zlib
 from collections import namedtuple
 
+import msgpack
 import redis
 
 
@@ -57,7 +61,7 @@ MODE_NONE = 0
 MODE_RAW = 1
 MODE_BINARY = 2
 MODE_TEXT = 3
-MODE_PICKLE = 4
+MODE_MSGPACK = 4
 
 DEFAULT_SETTINGS = {
     'statistics': 0,  # False
@@ -65,7 +69,6 @@ DEFAULT_SETTINGS = {
     'size_limit': 2**30,  # 1gb
     'cull_limit': 10,
     'disk_min_file_size': 2**15,  # 32kb
-    'disk_pickle_protocol': pickle.HIGHEST_PROTOCOL,
 }
 
 # Eviction policies that do not require writes during reads. The
@@ -77,17 +80,63 @@ EVICTION_POLICY = (
     'least-recently-stored',
 )
 
-# Record stored (pickled) as the Redis value for each cache entry.
+# Record stored (msgpack-encoded) as the Redis value for each cache entry.
 _Record = namedtuple(
     '_Record',
     'store_time expire_time tag size mode filename value',
 )
 
+# Msgpack extension type codes.
+_EXT_TUPLE = 1  # tuple, preserved as tuple on decode
+_EXT_TYPE = 2  # type object, stored as 'module.qualname' (memoize typed=True)
+
+
+def _msgpack_default(obj):
+    if isinstance(obj, tuple):
+        return msgpack.ExtType(_EXT_TUPLE, _dumps(list(obj)))
+    if isinstance(obj, type):
+        return msgpack.ExtType(_EXT_TYPE, full_name(obj).encode('utf-8'))
+    raise TypeError(
+        'cannot msgpack-encode object of type %r; keys, values, and tags'
+        ' must be msgpack-native (None, bool, int, float, str, bytes,'
+        ' list, dict, tuple); encode other objects to bytes yourself'
+        % type(obj).__name__
+    )
+
+
+def _msgpack_ext_hook(code, data):
+    if code == _EXT_TUPLE:
+        return tuple(_loads(data))
+    if code == _EXT_TYPE:
+        # Lossy by design: the qualified name string. Encoding is
+        # deterministic, so memoize(typed=True) keys keep working.
+        return data.decode('utf-8')
+    return msgpack.ExtType(code, data)
+
+
+def _dumps(obj):
+    """Serialize `obj` to msgpack bytes (never pickle)."""
+    try:
+        return msgpack.packb(
+            obj,
+            default=_msgpack_default,
+            strict_types=True,
+            use_bin_type=True,
+        )
+    except (OverflowError, ValueError) as exc:
+        # E.g. integers outside the 64-bit range.
+        raise TypeError('cannot msgpack-encode object: %s' % exc) from exc
+
+
+def _loads(data):
+    """Deserialize msgpack bytes back to an object."""
+    return msgpack.unpackb(data, ext_hook=_msgpack_ext_hook, raw=False)
+
 
 def _encode_key(db_key, raw):
     """Encode a database key (from Disk.put) as bytes with a type tag."""
     if not raw:
-        return b'p' + db_key
+        return b'm' + db_key
     if isinstance(db_key, bytes):
         return b'b' + db_key
     if isinstance(db_key, str):
@@ -109,24 +158,22 @@ def _decode_key(encoded):
         return int(payload), True
     if tag == b'f':
         return float(payload), True
-    assert tag == b'p'
+    assert tag == b'm'
     return payload, False
 
 
 class Disk:
     """Cache key and value serialization for Redis values and files."""
 
-    def __init__(self, directory, min_file_size=0, pickle_protocol=0):
+    def __init__(self, directory, min_file_size=0):
         """Initialize disk instance.
 
         :param str directory: directory path
         :param int min_file_size: minimum size for file use
-        :param int pickle_protocol: pickle protocol for serialization
 
         """
         self._directory = directory
         self.min_file_size = min_file_size
-        self.pickle_protocol = pickle_protocol
 
     def put(self, key):
         """Convert `key` to database key and raw pair.
@@ -150,9 +197,7 @@ class Disk:
         ):
             return key, True
         else:
-            data = pickle.dumps(key, protocol=self.pickle_protocol)
-            result = pickletools.optimize(data)
-            return result, False
+            return _dumps(key), False
 
     def get(self, key, raw):
         """Convert database key and raw pair back to the original key.
@@ -165,7 +210,7 @@ class Disk:
         if raw:
             return key
         else:
-            return pickle.load(io.BytesIO(key))
+            return _loads(key)
 
     def store(self, value, read, key=UNKNOWN):
         """Convert `value` to fields size, mode, filename, and value.
@@ -211,14 +256,14 @@ class Disk:
             size = self._write(full_path, iterator, 'xb')
             return size, MODE_BINARY, filename, None
         else:
-            result = pickle.dumps(value, protocol=self.pickle_protocol)
+            result = _dumps(value)
 
             if len(result) < min_file_size:
-                return 0, MODE_PICKLE, None, result
+                return 0, MODE_MSGPACK, None, result
             else:
                 filename, full_path = self.filename(key, value)
                 self._write(full_path, io.BytesIO(result), 'xb')
-                return len(result), MODE_PICKLE, filename, None
+                return len(result), MODE_MSGPACK, filename, None
 
     def _write(self, full_path, iterator, mode, encoding=None):
         full_dir, _ = op.split(full_path)
@@ -247,7 +292,7 @@ class Disk:
     def fetch(self, mode, filename, value, read):
         """Convert fields `mode`, `filename`, and `value` back to a value.
 
-        :param int mode: value mode raw, binary, text, or pickle
+        :param int mode: value mode raw, binary, text, or msgpack
         :param str filename: filename of corresponding value
         :param value: inline value from the Redis record
         :param bool read: when True, return an open file handle
@@ -268,12 +313,12 @@ class Disk:
             full_path = op.join(self._directory, filename)
             with open(full_path, 'r', encoding='UTF-8') as reader:
                 return reader.read()
-        elif mode == MODE_PICKLE:
+        elif mode == MODE_MSGPACK:
             if value is None:
                 with open(op.join(self._directory, filename), 'rb') as reader:
-                    return pickle.load(reader)
+                    return _loads(reader.read())
             else:
-                return pickle.load(io.BytesIO(value))
+                return _loads(value)
 
     def filename(self, key=UNKNOWN, value=UNKNOWN):
         """Return filename and full-path tuple for file storage.
@@ -410,10 +455,10 @@ def args_to_key(base, args, kwargs, typed, ignore):
 class Cache:
     """Redis and file backed cache.
 
-    Each entry is a single Redis key holding a pickled record with the entry
-    metadata and (for small values) the value itself. Values larger than
-    ``disk_min_file_size`` are written to files below ``offload_folder`` and
-    the record holds the filename instead.
+    Each entry is a single Redis key holding a msgpack-encoded record with
+    the entry metadata and (for small values) the value itself. Values
+    larger than ``disk_min_file_size`` are written to files below
+    ``offload_folder`` and the record holds the filename instead.
 
     Expiry uses native Redis TTLs (``SET ... PX``). Every entry has a TTL:
     when `expire` is not given, ``MAX_TTL_SECS`` (7 days) is used, and larger
@@ -545,11 +590,6 @@ class Cache:
         """Minimum size in bytes for value file offload."""
         return self._disk.min_file_size
 
-    @property
-    def disk_pickle_protocol(self):
-        """Pickle protocol used for serialization."""
-        return self._disk.pickle_protocol
-
     def _rkey(self, key):
         """Compute the Redis key for a Python cache key."""
         db_key, raw = self._disk.put(key)
@@ -557,11 +597,11 @@ class Cache:
 
     @staticmethod
     def _pack(record):
-        return pickle.dumps(record, protocol=pickle.HIGHEST_PROTOCOL)
+        return _dumps(list(record))
 
     @staticmethod
     def _unpack(data):
-        return pickle.loads(data)
+        return _Record(*_loads(data))
 
     def _meta_incr(self, field, delta=1):
         self._redis.hincrby(self._meta_key, field, delta)
