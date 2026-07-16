@@ -47,6 +47,12 @@ class Constant(tuple):
 ENOVAL = Constant('ENOVAL')
 UNKNOWN = Constant('UNKNOWN')
 
+# Maximum time-to-live for cache entries, in seconds. Every entry must have
+# a TTL: when `expire` is not given, MAX_TTL_SECS is used, and larger values
+# are clamped to it. Nothing is stored permanently, neither in Redis nor on
+# disk.
+MAX_TTL_SECS = 7 * 24 * 60 * 60  # 7 days
+
 MODE_NONE = 0
 MODE_RAW = 1
 MODE_BINARY = 2
@@ -409,8 +415,10 @@ class Cache:
     ``disk_min_file_size`` are written to files below ``offload_folder`` and
     the record holds the filename instead.
 
-    Expiry uses native Redis TTLs (``SET ... PX``). Reads are a single GET:
-    they never update TTLs or access metadata.
+    Expiry uses native Redis TTLs (``SET ... PX``). Every entry has a TTL:
+    when `expire` is not given, ``MAX_TTL_SECS`` (7 days) is used, and larger
+    values are clamped to it. Nothing is stored permanently. Reads are a
+    single GET: they never update TTLs or access metadata.
     """
 
     def __init__(
@@ -563,10 +571,15 @@ class Cache:
         return 0 if value is None else int(value)
 
     @staticmethod
+    def _effective_expire(expire):
+        """Effective TTL in seconds: MAX_TTL_SECS by default, clamped to it."""
+        if expire is None:
+            return MAX_TTL_SECS
+        return min(expire, MAX_TTL_SECS)
+
+    @staticmethod
     def _set_kwargs(expire):
         """Redis SET keyword arguments for the given expiry in seconds."""
-        if expire is None:
-            return {}
         return {'px': max(1, int(expire * 1000))}
 
     def _delete_record(self, rkey, record):
@@ -587,7 +600,7 @@ class Cache:
         :param key: key for item
         :param value: value for item
         :param float expire: seconds until item expires
-            (default None, no expiry)
+            (default None, MAX_TTL_SECS; clamped to MAX_TTL_SECS)
         :param bool read: read value as bytes from file (default False)
         :param tag: value to associate with key (default None)
         :return: True if item was set
@@ -595,7 +608,8 @@ class Cache:
         """
         now = time.time()
         rkey = self._rkey(key)
-        expire_time = None if expire is None else now + expire
+        expire = self._effective_expire(expire)
+        expire_time = now + expire
         size, mode, filename, db_value = self._disk.store(value, read, key=key)
         record = self._pack(
             _Record(now, expire_time, tag, size, mode, filename, db_value)
@@ -682,7 +696,7 @@ class Cache:
 
         :param key: key for item
         :param float expire: seconds until item expires
-            (default None, no expiry)
+            (default None, MAX_TTL_SECS; clamped to MAX_TTL_SECS)
         :return: True if key was touched
 
         """
@@ -700,7 +714,8 @@ class Cache:
             self._delete_record(rkey, record)
             return True
 
-        expire_time = None if expire is None else now + expire
+        expire = self._effective_expire(expire)
+        expire_time = now + expire
         record = record._replace(expire_time=expire_time)
         self._redis.set(rkey, self._pack(record), **self._set_kwargs(expire))
 
@@ -720,7 +735,7 @@ class Cache:
         :param key: key for item
         :param value: value for item
         :param float expire: seconds until the key expires
-            (default None, no expiry)
+            (default None, MAX_TTL_SECS; clamped to MAX_TTL_SECS)
         :param bool read: read value as bytes from file (default False)
         :param tag: value to associate with key (default None)
         :return: True if item was added
@@ -728,7 +743,8 @@ class Cache:
         """
         now = time.time()
         rkey = self._rkey(key)
-        expire_time = None if expire is None else now + expire
+        expire = self._effective_expire(expire)
+        expire_time = now + expire
         size, mode, filename, db_value = self._disk.store(value, read, key=key)
         record = self._pack(
             _Record(now, expire_time, tag, size, mode, filename, db_value)
@@ -788,9 +804,11 @@ class Cache:
                 value, False, key=key
             )
             record = self._pack(
-                _Record(now, None, None, size, mode, filename, db_value)
+                _Record(
+                    now, now + MAX_TTL_SECS, None, size, mode, filename, db_value
+                )
             )
-            self._redis.set(rkey, record)
+            self._redis.set(rkey, record, px=MAX_TTL_SECS * 1000)
             self._redis.zadd(self._index_key, {rkey: now})
             self._meta_incr('count', 1)
             self._meta_incr('size', size)
@@ -1037,7 +1055,7 @@ class Cache:
         :param str name: name given for callable (default None, automatic)
         :param bool typed: cache different types separately (default False)
         :param float expire: seconds until arguments expire
-            (default None, no expiry)
+            (default None, MAX_TTL_SECS; clamped to MAX_TTL_SECS)
         :param str tag: text to associate with arguments (default None)
         :param set ignore: positional or keyword args to ignore (default ())
         :return: callable decorator

@@ -250,11 +250,36 @@ def test_get(cache):
     assert cache.get(2, {}) == {}
     assert cache.get(0, expire_time=True, tag=True) == (None, None, None)
 
+    now = time.time()
     assert cache.set(0, 0, expire=None, tag='number')
 
-    assert cache.get(0, expire_time=True) == (0, None)
+    value, expire_time = cache.get(0, expire_time=True)
+    assert value == 0
+    assert now + dc.MAX_TTL_SECS - 1 < expire_time <= now + dc.MAX_TTL_SECS + 1
     assert cache.get(0, tag=True) == (0, 'number')
-    assert cache.get(0, expire_time=True, tag=True) == (0, None, 'number')
+
+    value, expire_time, tag = cache.get(0, expire_time=True, tag=True)
+    assert value == 0
+    assert expire_time is not None
+    assert tag == 'number'
+
+
+def test_max_ttl_default(cache):
+    # Entries always get a TTL, MAX_TTL_SECS by default.
+    assert cache.set(0, 0)
+    ttl = cache._redis.pttl(cache._rkey(0))
+    assert 0 < ttl <= dc.MAX_TTL_SECS * 1000
+    assert ttl > (dc.MAX_TTL_SECS - 60) * 1000
+
+
+def test_max_ttl_clamped(cache):
+    # TTLs larger than MAX_TTL_SECS are clamped.
+    assert cache.set(0, 0, expire=10 * dc.MAX_TTL_SECS)
+    ttl = cache._redis.pttl(cache._rkey(0))
+    assert 0 < ttl <= dc.MAX_TTL_SECS * 1000
+
+    _, expire_time = cache.get(0, expire_time=True)
+    assert expire_time <= time.time() + dc.MAX_TTL_SECS
 
 
 def test_get_expired(cache):
@@ -295,12 +320,17 @@ def test_pop(cache):
     assert cache.pop('beta', 'dne') == 'dne'
 
     assert cache.set('gamma', 789, tag='red')
-    assert cache.pop('gamma', expire_time=True, tag=True) == (789, None, 'red')
+    value, expire_time, tag = cache.pop('gamma', expire_time=True, tag=True)
+    assert value == 789
+    assert expire_time is not None
+    assert tag == 'red'
 
     assert cache.pop('dne') is None
 
     assert cache.set('delta', 210)
-    assert cache.pop('delta', expire_time=True) == (210, None)
+    value, expire_time = cache.pop('delta', expire_time=True)
+    assert value == 210
+    assert expire_time is not None
 
     assert cache.set('epsilon', '0' * 2**20)
     assert cache.pop('epsilon') == '0' * 2**20
@@ -514,7 +544,8 @@ def test_contains(cache):
 
 def test_touch(cache):
     assert cache.set(0, None, expire=60)
-    assert cache.touch(0, expire=None)
+    assert cache.touch(0, expire=None)  # Resets TTL to MAX_TTL_SECS.
+    assert cache._redis.pttl(cache._rkey(0)) > 60 * 1000
     assert cache.touch(0, expire=0)
     assert not cache.touch(0)
 
@@ -543,7 +574,10 @@ def test_add_large_value(cache):
 def test_incr(cache):
     assert cache.incr('key', default=5) == 6
     assert cache.incr('key', 2) == 8
-    assert cache.get('key', expire_time=True, tag=True) == (8, None, None)
+    value, expire_time, tag = cache.get('key', expire_time=True, tag=True)
+    assert value == 8
+    assert expire_time is not None
+    assert tag is None
     assert cache.delete('key')
     assert cache.set('key', 100, expire=0.100)
     assert cache.get('key') == 100
@@ -567,7 +601,10 @@ def test_incr_update_keyerror(cache):
 def test_decr(cache):
     assert cache.decr('key', default=5) == 4
     assert cache.decr('key', 2) == 2
-    assert cache.get('key', expire_time=True, tag=True) == (2, None, None)
+    value, expire_time, tag = cache.get('key', expire_time=True, tag=True)
+    assert value == 2
+    assert expire_time is not None
+    assert tag is None
     assert cache.delete('key')
     assert cache.set('key', 100, expire=0.100)
     assert cache.get('key') == 100

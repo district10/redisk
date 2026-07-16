@@ -49,6 +49,10 @@ cache.set('session', {'user': 42}, expire=3600)  # native Redis TTL
 cache.close()
 ```
 
+**Every entry has a TTL.** When `expire` is not given, entries expire after
+`redisk.MAX_TTL_SECS` (7 days), and larger `expire` values are clamped to it.
+Nothing is stored permanently — neither in Redis nor on disk.
+
 The constructor takes three main parameters:
 
 | Parameter        | Meaning                                                        |
@@ -93,6 +97,10 @@ Two bookkeeping keys complete the picture:
 `set(key, value, expire=seconds)` maps to `SET key record PX ms`. Expired
 entries disappear automatically on the server side; `get` stays a pure `GET`.
 
+Every entry carries a TTL: `expire=None` means `MAX_TTL_SECS` (7 days), and
+`expire` values larger than `MAX_TTL_SECS` are clamped to it. There is no
+permanent storage.
+
 ### Eviction and the disk limit
 
 `size_limit` bounds the total size of **offloaded files** (inline values live
@@ -100,6 +108,30 @@ in Redis and are not counted — Redis/Kvrocks manages its own capacity). After
 every write, if `volume()` exceeds `size_limit`, up to `cull_limit` oldest
 entries are evicted (`eviction_policy='least-recently-stored'`, the default;
 `'none'` disables eviction). `cache.cull()` evicts until under the limit.
+
+### When is the disk cleaned?
+
+Offloaded value files are removed **immediately** when their entry is:
+
+* overwritten by `set` (the old file is deleted after the new record is set),
+* deleted via `delete` / `del cache[key]` / `pop`,
+* removed by `evict(tag)`, `clear()`, or eviction (`cull()` / automatic cull
+  on writes when over `size_limit`),
+* removed by `expire()` for records whose expire time has passed but which
+  still exist (e.g. clock skew).
+
+The one exception is **TTL expiry**: when Redis expires a key on the server
+side, there is no hook to delete its file, so the file stays behind as an
+orphan. Orphan files are reclaimed by `check(fix=True)`, which walks
+`offload_folder` and deletes any file not referenced by a live record (it
+also corrects the `count`/`size` counters and prunes stale index members).
+Because every entry has a TTL of at most `MAX_TTL_SECS`, orphans are bounded
+— run `check(fix=True)` periodically (e.g. daily from a cron job) to reclaim
+them. `expire()` and `cull()` also purge stale index members left by TTL
+expiry, but only `check(fix=True)` removes the orphan files themselves.
+
+Empty sub-directories are removed together with their last file (the
+`offload_folder` root itself is always kept).
 
 ### Consistency caveats
 
@@ -146,7 +178,7 @@ diskcache.
 |----------------------------------------|-----------------------------------------------|
 | SQLite k/v store                       | Redis/Kvrocks k/v store                       |
 | `Cache(directory)`                     | `Cache(redis_conn_url, offload_folder, ...)`  |
-| Client-side expiry checks              | Native Redis TTLs                             |
+| Client-side expiry checks              | Native Redis TTLs; every entry has one (`MAX_TTL_SECS` default & cap) |
 | Transactions, `Timeout`, `retry` args  | Dropped (no multi-key atomicity without Lua)  |
 | LRU/LFU eviction (writes on read)      | Dropped by design; `none` / `least-recently-stored` only |
 | `push`/`pull`/`peek`/`peekitem` queues | Dropped                                       |

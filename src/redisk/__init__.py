@@ -12,6 +12,7 @@ from .core import (
     DEFAULT_SETTINGS,
     ENOVAL,
     EVICTION_POLICY,
+    MAX_TTL_SECS,
     UNKNOWN,
     Cache,
     Disk,
@@ -28,6 +29,7 @@ __all__ = [
     'EVICTION_POLICY',
     'EmptyDirWarning',
     'JSONDisk',
+    'MAX_TTL_SECS',
     'UNKNOWN',
     'UnknownFileWarning',
 ]
