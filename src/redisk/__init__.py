@@ -6,6 +6,9 @@ Redis (or Kvrocks) backed cache with local disk offload for large values.
 
 Derived from `python-diskcache <https://github.com/grantjenks/python-diskcache>`_
 with the SQLite key/value store replaced by Redis.
+
+`Cache` accepts `cache_key_prefix` for explicit Redis key prefixes and
+`default_ttl` for per-instance default time-to-live.
 """
 
 from .core import (
@@ -35,7 +38,7 @@ __all__ = [
 ]
 
 __title__ = 'redisk'
-__version__ = '0.1.0'
-__build__ = 0x000100
+__version__ = '0.2.0'
+__build__ = 0x000200
 __license__ = 'Apache 2.0'
 __copyright__ = 'Copyright 2026 TANG ZHIXIONG; derived from python-diskcache, Copyright 2016-2023 Grant Jenks'

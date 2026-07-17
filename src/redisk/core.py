@@ -471,6 +471,8 @@ class Cache:
         redis_conn_url='redis://localhost:6379/0',
         offload_folder=None,
         prefix='redisk',
+        cache_key_prefix=None,
+        default_ttl=None,
         disk=Disk,
         **settings,
     ):
@@ -486,6 +488,10 @@ class Cache:
         :param str prefix: namespace for all Redis keys used by this cache
             (default ``'redisk'``); use distinct prefixes to share one
             Redis/Kvrocks instance between caches
+        :param str cache_key_prefix: explicit prefix for individual cache
+            entry keys in Redis (default None, uses ``{prefix}:cache:``)
+        :param float default_ttl: default TTL in seconds for new entries
+            when ``expire`` is not given (default None, uses MAX_TTL_SECS)
         :param disk: Disk type or subclass for serialization
         :param settings: any of DEFAULT_SETTINGS (``statistics``,
             ``eviction_policy``, ``size_limit``, ``cull_limit``) plus
@@ -530,9 +536,21 @@ class Cache:
             self._owns_redis = False
 
         self._prefix = prefix
-        self._key_prefix = prefix.encode('utf-8') + b':cache:'
+        if cache_key_prefix is not None:
+            self._key_prefix = (
+                cache_key_prefix.encode('utf-8')
+                if isinstance(cache_key_prefix, str)
+                else cache_key_prefix
+            )
+        else:
+            self._key_prefix = prefix.encode('utf-8') + b':cache:'
         self._meta_key = prefix + ':meta'
         self._index_key = prefix + ':index'
+
+        if default_ttl is None:
+            self._default_ttl = MAX_TTL_SECS
+        else:
+            self._default_ttl = min(default_ttl, MAX_TTL_SECS)
 
         # Setup settings.
 
@@ -581,6 +599,16 @@ class Cache:
         return self._prefix
 
     @property
+    def cache_key_prefix(self):
+        """Prefix for individual cache entry keys in Redis."""
+        return self._key_prefix
+
+    @property
+    def default_ttl(self):
+        """Default TTL in seconds for new entries when expire is not given."""
+        return self._default_ttl
+
+    @property
     def disk(self):
         """Disk used for serialization."""
         return self._disk
@@ -610,11 +638,10 @@ class Cache:
         value = self._redis.hget(self._meta_key, field)
         return 0 if value is None else int(value)
 
-    @staticmethod
-    def _effective_expire(expire):
-        """Effective TTL in seconds: MAX_TTL_SECS by default, clamped to it."""
+    def _effective_expire(self, expire):
+        """Effective TTL in seconds: default_ttl by default, clamped to MAX_TTL_SECS."""
         if expire is None:
-            return MAX_TTL_SECS
+            return self._default_ttl
         return min(expire, MAX_TTL_SECS)
 
     @staticmethod
@@ -640,7 +667,7 @@ class Cache:
         :param key: key for item
         :param value: value for item
         :param float expire: seconds until item expires
-            (default None, MAX_TTL_SECS; clamped to MAX_TTL_SECS)
+            (default None, uses the cache's ``default_ttl``; clamped to MAX_TTL_SECS)
         :param bool read: read value as bytes from file (default False)
         :param tag: value to associate with key (default None)
         :return: True if item was set
@@ -736,7 +763,7 @@ class Cache:
 
         :param key: key for item
         :param float expire: seconds until item expires
-            (default None, MAX_TTL_SECS; clamped to MAX_TTL_SECS)
+            (default None, uses the cache's ``default_ttl``; clamped to MAX_TTL_SECS)
         :return: True if key was touched
 
         """
@@ -845,10 +872,10 @@ class Cache:
             )
             record = self._pack(
                 _Record(
-                    now, now + MAX_TTL_SECS, None, size, mode, filename, db_value
+                    now, now + self._default_ttl, None, size, mode, filename, db_value
                 )
             )
-            self._redis.set(rkey, record, px=MAX_TTL_SECS * 1000)
+            self._redis.set(rkey, record, px=self._default_ttl * 1000)
             self._redis.zadd(self._index_key, {rkey: now})
             self._meta_incr('count', 1)
             self._meta_incr('size', size)

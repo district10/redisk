@@ -39,6 +39,7 @@ cache = Cache(
     redis_conn_url='redis://localhost:6666/0',  # your Redis/Kvrocks URL
     offload_folder='/var/cache/myapp',          # where large values go
     size_limit=2**30,                           # 1 GiB disk budget (default)
+    default_ttl=86400,                          # default 1 day instead of 7
 )
 
 cache['key'] = 'small value'        # stored inside Redis
@@ -49,21 +50,24 @@ cache.set('session', {'user': 42}, expire=3600)  # native Redis TTL
 cache.close()
 ```
 
-**Every entry has a TTL.** When `expire` is not given, entries expire after
-`redisk.MAX_TTL_SECS` (7 days), and larger `expire` values are clamped to it.
-Nothing is stored permanently — neither in Redis nor on disk.
+**Every entry has a TTL.** When `expire` is not given, entries use the cache's
+`default_ttl` (constructor argument, default `redisk.MAX_TTL_SECS` = 7 days),
+and larger `expire` values are clamped to `MAX_TTL_SECS`. Nothing is stored
+permanently — neither in Redis nor on disk.
 
-The constructor takes three main parameters:
+The constructor takes these main parameters:
 
-| Parameter        | Meaning                                                        |
-|------------------|----------------------------------------------------------------|
-| `redis_conn_url` | Redis/Kvrocks connection URL, **or** an existing client object |
-| `offload_folder` | Local directory for offloaded value files                      |
-| `size_limit`     | Capacity limit in bytes for the offload folder (default 1 GiB) |
+| Parameter          | Meaning                                                        |
+|--------------------|----------------------------------------------------------------|
+| `redis_conn_url`   | Redis/Kvrocks connection URL, **or** an existing client object |
+| `offload_folder`   | Local directory for offloaded value files                      |
+| `size_limit`       | Capacity limit in bytes for the offload folder (default 1 GiB) |
+| `prefix`           | Redis key namespace (default `'redisk'`)                       |
+| `cache_key_prefix` | Explicit prefix for cache entry keys (default `{prefix}:cache:`)|
+| `default_ttl`      | Default TTL in seconds when `expire` is not given (default 7 d)|
 
-Additional keyword arguments mirror diskcache's settings: `prefix`
-(Redis key namespace, default `'redisk'`), `statistics`, `eviction_policy`,
-`cull_limit`, `disk_min_file_size` (default 32 KiB), and
+Additional keyword arguments mirror diskcache's settings: `statistics`,
+`eviction_policy`, `cull_limit`, `disk_min_file_size` (default 32 KiB), and
 `disk_pickle_protocol`.
 
 Passing an existing client (anything with the `redis.Redis` interface, e.g.
@@ -117,9 +121,9 @@ as diskcache.
 `set(key, value, expire=seconds)` maps to `SET key record PX ms`. Expired
 entries disappear automatically on the server side; `get` stays a pure `GET`.
 
-Every entry carries a TTL: `expire=None` means `MAX_TTL_SECS` (7 days), and
-`expire` values larger than `MAX_TTL_SECS` are clamped to it. There is no
-permanent storage.
+Every entry carries a TTL: `expire=None` falls back to the cache's
+`default_ttl` (default `MAX_TTL_SECS` = 7 days), and `expire` values larger
+than `MAX_TTL_SECS` are clamped to it. There is no permanent storage.
 
 ### Eviction and the disk limit
 
